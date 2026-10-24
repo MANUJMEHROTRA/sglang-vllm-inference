@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# What is DELIBERATELY NOT ignored, because it is the point of the project:
+#   results/**/*.json     the measurements themselves -- small, and the
+#                         website is built from them
+#   docs/data/results.json the published payload GitHub Pages serves
+#   notebooks/*.ipynb     generated from tools/nbsrc/, but committed so the
+#                         Colab badges and the Pages links resolve
+# ---------------------------------------------------------------------------
+
+# Local Claude Code permissions -- machine-specific absolute paths
+.claude/settings.local.json
+
+# Server logs from bench.servers.serve()
+logs/
+*.log
+
+# Downloaded models and build artifacts: large, and reproducible from the
+# notebooks that fetch or build them
+gguf/
+llama.cpp/
+trt/
+model_repository/*/1/*.onnx
+*.onnx
+*.gguf
+*.engine
+*.safetensors
+*.bin
+wikitext_test.txt
+
+# Profiler output from notebook 08 (Nsight Systems / Nsight Compute)
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.sqlite
+
+# Generated figures -- regenerate by re-running the notebooks
+results/figures/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Node (only used by tools/check_site.mjs and tools/check_responsive.mjs)
+node_modules/
+package-lock.json
+
+# Scratch from tools/check_parity.py
+.parity_dump.mjs
+
+# Secrets
+.env
+.env.*
+*.pem
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,389 @@
+/* Inference engines study site -- design tokens and layout.
+   Dark mode is a selected set of steps against the dark surface, not an
+   automatic inversion. The categorical series colours match bench/plots.py
+   exactly, so a chart on this page and a chart in a notebook use the same
+   hue for the same engine. */
+
+:root {
+  color-scheme: light;
+
+  --page:            #f9f9f7;
+  --surface:         #fcfcfb;
+  --surface-sunken:  #f2f1ed;
+
+  --text-primary:    #0b0b0b;
+  --text-secondary:  #52514e;
+  --text-muted:      #898781;
+
+  --grid:            #e1e0d9;
+  --axis:            #c3c2b7;
+  --border:          rgba(11, 11, 11, 0.10);
+
+  --series-1: #2a78d6;  /* blue    - vLLM */
+  --series-2: #eb6834;  /* orange  - SGLang */
+  --series-3: #1baf7a;  /* aqua    - llama.cpp */
+  --series-4: #eda100;  /* yellow  - TensorRT-LLM */
+  --series-5: #e87ba4;  /* magenta - Triton Server */
+  --series-6: #008300;  /* green   - ONNX Runtime */
+  --series-7: #6250d6;  /* violet  - torch.compile */
+  --series-8: #e34948;  /* red */
+  --series-baseline: #898781;
+
+  --good:     #0ca30c;
+  --warning:  #fab219;
+  --critical: #d03b3b;
+
+  --accent: var(--series-1);
+
+  --radius: 10px;
+  --maxw: 1080px;
+  --gutter: 16px;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface:        #1a1a19;
+    --surface-sunken: #141413;
+    --text-primary:   #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+    --good: #0ca30c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:           #0d0d0d;
+  --surface:        #1a1a19;
+  --surface-sunken: #141413;
+  --text-primary:   #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --grid:           #2c2c2a;
+  --axis:           #383835;
+  --border:         rgba(255, 255, 255, 0.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --good: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 76px; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- nav ---------- */
+
+.nav {
+  position: sticky; top: 0; z-index: 50;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-inner {
+  max-width: var(--maxw); margin: 0 auto;
+  padding: 10px var(--gutter);
+  display: flex; align-items: center; gap: 16px;
+}
+.nav-brand {
+  font-weight: 650; font-size: 15px; letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.nav-links {
+  display: flex; gap: 2px; overflow-x: auto; flex: 1;
+  scrollbar-width: none;
+}
+.nav-links::-webkit-scrollbar { display: none; }
+.nav-links a {
+  color: var(--text-secondary); text-decoration: none;
+  font-size: 13px; padding: 5px 9px; border-radius: 6px;
+  white-space: nowrap;
+}
+.nav-links a:hover { background: var(--surface-sunken); color: var(--text-primary); }
+.theme-toggle {
+  background: none; border: 1px solid var(--border); color: var(--text-secondary);
+  border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 13px;
+  font-family: inherit;
+}
+.theme-toggle:hover { color: var(--text-primary); }
+
+/* ---------- layout ---------- */
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gutter); }
+
+.hero { padding: 56px 0 40px; border-bottom: 1px solid var(--border); }
+.hero h1 {
+  font-size: clamp(30px, 5.2vw, 46px); line-height: 1.12;
+  letter-spacing: -0.025em; margin: 0 0 16px; font-weight: 680;
+}
+.hero .lede { font-size: 18px; color: var(--text-secondary); max-width: 68ch; margin: 0 0 24px; }
+
+section { padding: 52px 0; border-bottom: 1px solid var(--border); }
+section > h2 {
+  font-size: clamp(22px, 3.4vw, 29px); letter-spacing: -0.02em;
+  margin: 0 0 6px; font-weight: 650;
+}
+section > .section-sub {
+  color: var(--text-secondary); margin: 0 0 28px; max-width: 70ch; font-size: 16.5px;
+}
+h3 { font-size: 19px; margin: 34px 0 10px; letter-spacing: -0.012em; font-weight: 620; }
+h4 { font-size: 15.5px; margin: 22px 0 8px; font-weight: 620; }
+p { max-width: 72ch; }
+a { color: var(--accent); }
+
+/* Long identifiers in prose (gpu_memory_utilization,
+   max_queue_delay_microseconds) are single unbreakable words that would
+   otherwise widen the page at phone width. */
+h1, h2, h3, h4, p, li, figcaption, .note, .verdict { overflow-wrap: break-word; }
+
+.eyebrow {
+  font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-muted); font-weight: 620; margin-bottom: 10px;
+}
+
+/* ---------- cards & grids ---------- */
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px;
+}
+.grid { display: grid; gap: 16px; }
+.grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* Grid and flex children default to min-width:auto, which means they refuse
+   to shrink below their content. A card holding a wide table then pushes the
+   whole page wider than the viewport and the reader gets a horizontal scroll
+   on their phone. min-width:0 lets the card shrink so the .table-scroll
+   inside it does the scrolling instead -- which is what it is for. */
+.grid > *, .nav-inner > *, .chart-head > * { min-width: 0; }
+
+@media (max-width: 860px) {
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+}
+
+.engine-card h3 { margin: 0 0 2px; font-size: 17px; }
+.engine-card .kind {
+  font-size: 11.5px; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: 600;
+}
+.engine-card .swatch {
+  display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+  margin-right: 7px; vertical-align: 1px;
+}
+.engine-card ul { margin: 10px 0 0; padding-left: 18px; font-size: 14.5px; }
+.engine-card li { margin: 4px 0; color: var(--text-secondary); }
+.engine-card .verdict {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+
+/* ---------- figures ---------- */
+
+figure { margin: 24px 0; }
+figure svg { max-width: 100%; height: auto; display: block; }
+figcaption {
+  font-size: 13.5px; color: var(--text-muted); margin-top: 10px;
+  max-width: 72ch; line-height: 1.55;
+}
+
+/* ---------- callouts ---------- */
+
+.note {
+  border-left: 3px solid var(--accent); background: var(--surface);
+  padding: 14px 18px; border-radius: 0 var(--radius) var(--radius) 0;
+  margin: 22px 0; font-size: 15px;
+}
+.note.warn { border-left-color: var(--warning); }
+.note.key  { border-left-color: var(--good); }
+.note strong { font-weight: 640; }
+.note p:last-child { margin-bottom: 0; }
+.note p:first-child { margin-top: 0; }
+
+/* ---------- tables ---------- */
+
+.table-scroll { overflow-x: auto; margin: 18px 0; }
+table {
+  border-collapse: collapse; width: 100%; font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+th, td {
+  text-align: left; padding: 9px 12px;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+th { color: var(--text-muted); font-weight: 600; font-size: 12.5px;
+     text-transform: uppercase; letter-spacing: 0.05em; }
+td.num, th.num { text-align: right; }
+tbody tr:hover { background: var(--surface-sunken); }
+
+/* ---------- interactive controls ---------- */
+
+.controls {
+  display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: flex-end;
+  padding: 16px 18px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: 18px;
+}
+.control { display: flex; flex-direction: column; gap: 5px; min-width: 150px; }
+.control label {
+  font-size: 12px; color: var(--text-muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.control select, .control input[type="number"] {
+  background: var(--page); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 9px; font-size: 14px; font-family: inherit;
+}
+.control input[type="range"] { width: 100%; accent-color: var(--accent); }
+.control .value {
+  font-family: var(--mono); font-size: 13px; color: var(--text-secondary);
+}
+
+.readout { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.stat {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 18px; min-width: 150px; flex: 1;
+}
+.stat .label {
+  font-size: 11.5px; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: 0.06em; font-weight: 620;
+}
+.stat .value {
+  font-size: 26px; font-weight: 640; letter-spacing: -0.02em;
+  margin-top: 3px; line-height: 1.15;
+}
+.stat .sub { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+
+/* ---------- charts ---------- */
+
+.chart-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px;
+}
+.chart-head { display: flex; justify-content: space-between; align-items: baseline;
+              gap: 12px; margin-bottom: 4px; }
+.chart-title { font-size: 15.5px; font-weight: 620; }
+.chart-note { font-size: 12.5px; color: var(--text-muted); }
+.chart-body { position: relative; }
+.chart-body svg { width: 100%; height: auto; display: block; overflow: visible; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 13px; }
+.legend-item { display: flex; align-items: center; gap: 6px; color: var(--text-secondary);
+               cursor: pointer; }
+.legend-item .dot { width: 10px; height: 10px; border-radius: 3px; }
+.legend-item.off { opacity: 0.35; }
+
+.tooltip {
+  position: absolute; pointer-events: none; opacity: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px 11px; font-size: 12.5px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.13); transition: opacity 0.1s;
+  z-index: 5; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.tooltip .tt-title { font-weight: 620; margin-bottom: 3px; }
+.tooltip .tt-row { color: var(--text-secondary); }
+
+.toggle-table {
+  background: none; border: 1px solid var(--border); color: var(--text-secondary);
+  border-radius: 6px; padding: 4px 9px; font-size: 12px; cursor: pointer;
+  font-family: inherit;
+}
+.toggle-table:hover { color: var(--text-primary); }
+
+.empty-state {
+  padding: 36px 24px; text-align: center; color: var(--text-muted);
+  background: var(--surface-sunken); border-radius: var(--radius);
+  border: 1px dashed var(--axis); font-size: 14.5px;
+}
+.empty-state code { font-size: 13px; }
+
+/* ---------- decision tree ---------- */
+
+.tree { margin-top: 18px; }
+.tree-q { font-size: 17px; font-weight: 620; margin-bottom: 14px; }
+.tree-options { display: flex; flex-wrap: wrap; gap: 10px; }
+.tree-btn {
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text-primary); border-radius: 8px; padding: 10px 16px;
+  font-size: 14.5px; cursor: pointer; font-family: inherit;
+  transition: border-color 0.12s, background 0.12s;
+}
+.tree-btn:hover { border-color: var(--accent); background: var(--surface-sunken); }
+.tree-path {
+  display: flex; flex-wrap: wrap; gap: 7px; align-items: center;
+  margin-bottom: 14px; font-size: 13px; color: var(--text-muted);
+  min-height: 22px;
+}
+.tree-crumb {
+  background: var(--surface-sunken); border-radius: 5px; padding: 2px 8px;
+  border: 1px solid var(--border);
+}
+.tree-answer { border-left: 3px solid var(--good); }
+.tree-answer h3 { margin-top: 0; }
+
+/* ---------- misc ---------- */
+
+code {
+  font-family: var(--mono); font-size: 0.89em;
+  background: var(--surface-sunken); padding: 0.12em 0.38em;
+  border-radius: 4px; border: 1px solid var(--border);
+}
+pre {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 15px 18px; overflow-x: auto;
+  font-size: 13px; line-height: 1.55;
+}
+pre code { background: none; border: none; padding: 0; }
+
+.pill {
+  display: inline-block; font-size: 11.5px; padding: 2px 9px;
+  border-radius: 999px; border: 1px solid var(--border);
+  color: var(--text-secondary); background: var(--surface-sunken);
+  font-weight: 600; letter-spacing: 0.02em;
+}
+
+footer {
+  padding: 40px 0 64px; color: var(--text-muted); font-size: 14px;
+}
+footer a { color: var(--text-secondary); }
+
+.anchor-list { columns: 2; column-gap: 32px; font-size: 14.5px; }
+@media (max-width: 700px) { .anchor-list { columns: 1; } }
+.anchor-list a { display: block; padding: 3px 0; text-decoration: none; }
+.anchor-list a:hover { text-decoration: underline; }
+
+.synthetic-flag {
+  font-size: 11px; color: var(--warning); font-weight: 650;
+}

@@ -1,0 +1,1113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inference Engines, From First Principles</title>
+<meta name="description" content="vLLM, SGLang, llama.cpp/GGUF, TensorRT-LLM and Triton compared from first principles: the roofline, the KV cache, the metrics, and which to choose when.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#9889;</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<!-- data-repo is stamped by tools/build_notebooks.py from your git remote.
+     GitHub Pages serves docs/ as the site root, so notebook links must point at
+     github.com rather than at a relative ../notebooks/ path that does not exist
+     on the published site. -->
+<body data-repo="MANUJMEHROTRA/sglang-vllm-inference">
+
+<nav class="nav">
+  <div class="nav-inner">
+    <span class="nav-brand">Inference Engines</span>
+    <div class="nav-links">
+      <a href="#phases">Two phases</a>
+      <a href="#roofline">Roofline</a>
+      <a href="#kv">KV cache</a>
+      <a href="#metrics">Metrics</a>
+      <a href="#batching">Batching</a>
+      <a href="#paging">Paging &amp; prefixes</a>
+      <a href="#quant">Quantization</a>
+      <a href="#engines">The engines</a>
+      <a href="#results">Results</a>
+      <a href="#decide">Choose</a>
+      <a href="#kernels">Kernels</a>
+    </div>
+    <button class="theme-toggle" id="theme-toggle" aria-label="Toggle colour theme">Theme</button>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">A study project</div>
+    <h1>Inference engines,<br>from first principles</h1>
+    <p class="lede">
+      vLLM, SGLang, llama.cpp&nbsp;/&nbsp;GGUF, TensorRT-LLM and Triton Inference Server
+      &mdash; what each one actually does, why it is fast, and how to choose. Every claim
+      here is either derived from the hardware or measured by a notebook in this repo
+      using one shared benchmark harness.
+    </p>
+    <div class="grid grid-4" style="margin-top:28px">
+      <div class="stat">
+        <div class="label">The core fact</div>
+        <div class="value">~1</div>
+        <div class="sub">FLOP per byte during decode, against a GPU that needs ~200</div>
+      </div>
+      <div class="stat">
+        <div class="label">Which means</div>
+        <div class="value">&lt;1%</div>
+        <div class="sub">of a GPU's arithmetic is used at batch size 1</div>
+      </div>
+      <div class="stat">
+        <div class="label">So the lever is</div>
+        <div class="value">bytes</div>
+        <div class="sub">batching, quantization, caching &mdash; not faster math</div>
+      </div>
+      <div class="stat">
+        <div class="label">And the metric is</div>
+        <div class="value">goodput</div>
+        <div class="sub">requests/s that actually met a latency SLO</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<!-- ================================================================ PHASES -->
+<section id="phases">
+  <div class="wrap">
+    <div class="eyebrow">01</div>
+    <h2>A model answers in two different phases</h2>
+    <p class="section-sub">
+      Almost every design decision in every engine below is a response to the gap
+      between prefill and decode. They have opposite bottlenecks and they compete
+      for the same GPU.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 760 330" role="img" aria-label="Prefill processes all prompt tokens in one compute-bound forward pass producing TTFT; decode runs one memory-bound forward pass per output token producing TPOT.">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- divider -->
+        <line x1="380" y1="10" x2="380" y2="320" stroke="currentColor" stroke-width="1" opacity="0.18"/>
+
+        <!-- ============ PREFILL ============ -->
+        <text x="20" y="24" font-size="13" font-weight="650" fill="currentColor">PREFILL &mdash; read the prompt</text>
+        <text x="20" y="42" font-size="11.5" fill="currentColor" opacity="0.65">one forward pass over all N tokens</text>
+
+        <g>
+          <text x="20" y="70" font-size="11" fill="currentColor" opacity="0.6">prompt tokens</text>
+          <rect x="20"  y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="50"  y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="80"  y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="110" y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="140" y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="170" y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="200" y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+          <rect x="230" y="78" width="26" height="22" rx="3" fill="var(--series-1)" opacity="0.85"/>
+        </g>
+
+        <line x1="138" y1="104" x2="138" y2="124" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+        <text x="148" y="119" font-size="10.5" fill="currentColor" opacity="0.6">all at once</text>
+
+        <rect x="20" y="128" width="236" height="40" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="138" y="146" font-size="12" text-anchor="middle" fill="currentColor">one forward pass</text>
+        <text x="138" y="161" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.6">O(N&#178;) attention &#183; big matmuls</text>
+
+        <line x1="138" y1="172" x2="138" y2="192" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+        <rect x="112" y="196" width="52" height="22" rx="3" fill="var(--series-2)"/>
+        <text x="138" y="211" font-size="10.5" text-anchor="middle" fill="var(--surface)">tok 1</text>
+
+        <text x="20" y="245" font-size="11" fill="currentColor" opacity="0.6">KV cache filled</text>
+        <g fill="var(--series-3)" opacity="0.8">
+          <rect x="20" y="252" width="26" height="14" rx="2"/><rect x="50" y="252" width="26" height="14" rx="2"/>
+          <rect x="80" y="252" width="26" height="14" rx="2"/><rect x="110" y="252" width="26" height="14" rx="2"/>
+          <rect x="140" y="252" width="26" height="14" rx="2"/><rect x="170" y="252" width="26" height="14" rx="2"/>
+          <rect x="200" y="252" width="26" height="14" rx="2"/><rect x="230" y="252" width="26" height="14" rx="2"/>
+        </g>
+
+        <text x="20" y="292" font-size="12" font-weight="620" fill="var(--series-1)">COMPUTE-bound</text>
+        <text x="20" y="310" font-size="11.5" fill="currentColor" opacity="0.7">determines TTFT</text>
+
+        <!-- ============ DECODE ============ -->
+        <text x="404" y="24" font-size="13" font-weight="650" fill="currentColor">DECODE &mdash; write the answer</text>
+        <text x="404" y="42" font-size="11.5" fill="currentColor" opacity="0.65">one forward pass per output token</text>
+
+        <g>
+          <!-- step 1 -->
+          <rect x="404" y="78" width="40" height="22" rx="3" fill="var(--series-2)"/>
+          <text x="424" y="93" font-size="10" text-anchor="middle" fill="var(--surface)">tok 1</text>
+          <line x1="424" y1="104" x2="424" y2="124" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <rect x="398" y="128" width="52" height="40" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="424" y="145" font-size="9.5" text-anchor="middle" fill="currentColor">pass</text>
+          <text x="424" y="158" font-size="9.5" text-anchor="middle" fill="currentColor" opacity="0.6">reads ALL</text>
+          <line x1="424" y1="172" x2="424" y2="192" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <rect x="404" y="196" width="40" height="22" rx="3" fill="var(--series-2)"/>
+          <text x="424" y="211" font-size="10" text-anchor="middle" fill="var(--surface)">tok 2</text>
+
+          <!-- step 2 -->
+          <rect x="504" y="78" width="40" height="22" rx="3" fill="var(--series-2)"/>
+          <text x="524" y="93" font-size="10" text-anchor="middle" fill="var(--surface)">tok 2</text>
+          <line x1="524" y1="104" x2="524" y2="124" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <rect x="498" y="128" width="52" height="40" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="524" y="145" font-size="9.5" text-anchor="middle" fill="currentColor">pass</text>
+          <text x="524" y="158" font-size="9.5" text-anchor="middle" fill="currentColor" opacity="0.6">weights</text>
+          <line x1="524" y1="172" x2="524" y2="192" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <rect x="504" y="196" width="40" height="22" rx="3" fill="var(--series-2)"/>
+          <text x="524" y="211" font-size="10" text-anchor="middle" fill="var(--surface)">tok 3</text>
+
+          <!-- step 3 -->
+          <rect x="604" y="78" width="40" height="22" rx="3" fill="var(--series-2)"/>
+          <text x="624" y="93" font-size="10" text-anchor="middle" fill="var(--surface)">tok 3</text>
+          <line x1="624" y1="104" x2="624" y2="124" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <rect x="598" y="128" width="52" height="40" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="624" y="145" font-size="9.5" text-anchor="middle" fill="currentColor">pass</text>
+          <text x="624" y="158" font-size="9.5" text-anchor="middle" fill="currentColor" opacity="0.6">again</text>
+          <line x1="624" y1="172" x2="624" y2="192" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <rect x="604" y="196" width="40" height="22" rx="3" fill="var(--series-2)"/>
+          <text x="624" y="211" font-size="10" text-anchor="middle" fill="var(--surface)">tok 4</text>
+
+          <text x="692" y="150" font-size="16" fill="currentColor" opacity="0.5">&#8230;</text>
+        </g>
+
+        <text x="404" y="245" font-size="11" fill="currentColor" opacity="0.6">KV cache grows by one each step</text>
+        <g fill="var(--series-3)" opacity="0.8">
+          <rect x="404" y="252" width="34" height="14" rx="2"/>
+          <rect x="442" y="252" width="34" height="14" rx="2" opacity="0.75"/>
+          <rect x="480" y="252" width="34" height="14" rx="2" opacity="0.5"/>
+          <rect x="518" y="252" width="34" height="14" rx="2" opacity="0.3"/>
+        </g>
+
+        <text x="404" y="292" font-size="12" font-weight="620" fill="var(--series-2)">MEMORY-bound</text>
+        <text x="404" y="310" font-size="11.5" fill="currentColor" opacity="0.7">determines TPOT / inter-token latency</text>
+      </svg>
+      <figcaption>
+        Prefill processes every prompt token in a single pass &mdash; large matmuls that
+        keep the tensor cores busy. Decode then runs one pass per output token, and
+        each pass must read <em>every weight in the model</em> from memory to produce
+        a single token. That asymmetry is the source of nearly every optimisation
+        on this page.
+      </figcaption>
+    </figure>
+
+    <div class="note key">
+      <p><strong>Why batching is the primary lever.</strong> The weights are read once
+      per <em>step</em>, not once per <em>sequence</em>. Decode 32 sequences in one step
+      and that same memory traffic produces 32 tokens instead of 1. Arithmetic intensity
+      rises ~32&times; and so does throughput &mdash; which is the entire economic
+      argument for a serving engine over a <code>for</code> loop.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================== ROOFLINE -->
+<section id="roofline">
+  <div class="wrap">
+    <div class="eyebrow">02</div>
+    <h2>The roofline: the speed limit you cannot argue with</h2>
+    <p class="section-sub">
+      A kernel is limited either by how fast the GPU does math or by how fast it moves
+      bytes. Which side you are on determines which optimisations can possibly work.
+    </p>
+
+    <pre><code>achievable FLOP/s = min( peak_FLOPs , arithmetic_intensity &times; peak_bandwidth )
+                         \______/                              \___________/
+                       compute roof                            memory roof</code></pre>
+
+    <div class="controls">
+      <div class="control">
+        <label for="rl-gpu">GPU</label>
+        <select id="rl-gpu"></select>
+      </div>
+      <div class="control">
+        <label for="rl-batch">Decode batch size <span class="value" id="rl-batch-v">1</span></label>
+        <input type="range" id="rl-batch" min="0" max="8" step="1" value="0">
+      </div>
+      <div class="control">
+        <label for="rl-ctx">Context length <span class="value" id="rl-ctx-v">1024</span></label>
+        <input type="range" id="rl-ctx" min="0" max="5" step="1" value="2">
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-title">Where each phase sits on the roofline</span>
+        <span class="chart-note" id="rl-ridge"></span>
+      </div>
+      <div class="chart-body"><div id="rl-chart"></div></div>
+      <div class="legend" id="rl-legend"></div>
+    </div>
+
+    <div class="readout" id="rl-readout"></div>
+
+    <div class="note">
+      <p><strong>How to use this.</strong> Everything left of the ridge point is
+      bandwidth-starved: the only wins are moving fewer bytes &mdash; quantization,
+      kernel fusion, a smaller KV cache, bigger batches. Faster arithmetic (FP8, better
+      tensor-core use) does <em>nothing</em> there. Notice that the ridge barely moves
+      from a T4 to an H100 while raw performance grows ~15&times;: memory bandwidth has
+      not kept pace with arithmetic, and that divergence is why inference engineering is
+      almost entirely about moving fewer bytes.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================================== KV -->
+<section id="kv">
+  <div class="wrap">
+    <div class="eyebrow">03</div>
+    <h2>The KV cache is your real memory budget</h2>
+    <p class="section-sub">
+      Weights are a fixed cost. The KV cache is the variable one, and it &mdash; not the
+      model size &mdash; decides how many users you can serve at once.
+    </p>
+
+    <pre><code>KV bytes = 2 (K and V) &times; layers &times; kv_heads &times; head_dim &times; tokens &times; dtype_bytes</code></pre>
+
+    <div class="controls">
+      <div class="control">
+        <label for="kv-model">Model</label>
+        <select id="kv-model"></select>
+      </div>
+      <div class="control">
+        <label for="kv-gpu">GPU memory</label>
+        <select id="kv-gpu"></select>
+      </div>
+      <div class="control">
+        <label for="kv-ctx">Context per sequence <span class="value" id="kv-ctx-v">4096</span></label>
+        <input type="range" id="kv-ctx" min="0" max="6" step="1" value="3">
+      </div>
+      <div class="control">
+        <label for="kv-dtype">KV dtype</label>
+        <select id="kv-dtype">
+          <option value="2">fp16 / bf16 (2 bytes)</option>
+          <option value="1">int8 (1 byte)</option>
+          <option value="0.5">fp4 (0.5 bytes)</option>
+        </select>
+      </div>
+      <div class="control">
+        <label for="kv-wdtype">Weight dtype</label>
+        <select id="kv-wdtype">
+          <option value="2">fp16 / bf16</option>
+          <option value="1">int8 / fp8</option>
+          <option value="0.5">int4 (AWQ / GPTQ / Q4_K)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="readout" id="kv-readout"></div>
+
+    <div class="chart-card" style="margin-top:18px">
+      <div class="chart-head">
+        <span class="chart-title">How many sequences fit, by context length</span>
+        <button class="toggle-table" data-table="kv-table">Table</button>
+      </div>
+      <div class="chart-body"><div id="kv-chart"></div></div>
+      <div id="kv-table" hidden></div>
+    </div>
+
+    <h3>Why grouped-query attention exists</h3>
+    <p>
+      Notice the <code>kv_heads</code> term. Qwen2.5-0.5B has 14 query heads but only
+      <strong>2</strong> KV heads &mdash; each KV head is shared across 7 query heads.
+      That makes the cache <strong>7&times; smaller</strong> than plain multi-head
+      attention, which translates directly into 7&times; more concurrent users in the
+      same memory. Try switching models above and watch the per-sequence cost change
+      far more than the parameter count does.
+    </p>
+  </div>
+</section>
+
+<!-- =============================================================== METRICS -->
+<section id="metrics">
+  <div class="wrap">
+    <div class="eyebrow">04</div>
+    <h2>The metrics, defined precisely</h2>
+    <p class="section-sub">
+      Most benchmark disagreements are definition disagreements. These are the
+      definitions used by every measurement in this project.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 760 240" role="img" aria-label="Timeline showing TTFT from request to first token, inter-token latencies between subsequent tokens, and end-to-end latency spanning the whole request.">
+        <defs>
+          <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- event markers -->
+        <line x1="60" y1="28" x2="60" y2="196" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+        <line x1="300" y1="28" x2="300" y2="196" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+        <line x1="700" y1="28" x2="700" y2="196" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+
+        <text x="60" y="20" font-size="11" text-anchor="middle" fill="currentColor" opacity="0.7">request sent</text>
+        <text x="300" y="20" font-size="11" text-anchor="middle" fill="currentColor" opacity="0.7">first token</text>
+        <text x="700" y="20" font-size="11" text-anchor="middle" fill="currentColor" opacity="0.7">last token</text>
+
+        <!-- TTFT bar -->
+        <rect x="60" y="44" width="240" height="26" rx="4" fill="var(--series-1)" opacity="0.9"/>
+        <text x="180" y="62" font-size="12" text-anchor="middle" fill="var(--surface)" font-weight="620">TTFT</text>
+        <text x="312" y="62" font-size="11" fill="currentColor" opacity="0.7">queue wait + prefill</text>
+
+        <!-- token stream -->
+        <g fill="var(--series-2)">
+          <rect x="300" y="86" width="30" height="22" rx="3"/>
+          <rect x="340" y="86" width="30" height="22" rx="3"/>
+          <rect x="380" y="86" width="30" height="22" rx="3"/>
+          <rect x="420" y="86" width="30" height="22" rx="3"/>
+          <rect x="460" y="86" width="30" height="22" rx="3"/>
+          <rect x="500" y="86" width="30" height="22" rx="3"/>
+          <rect x="540" y="86" width="30" height="22" rx="3"/>
+          <rect x="580" y="86" width="30" height="22" rx="3"/>
+          <rect x="620" y="86" width="30" height="22" rx="3"/>
+          <rect x="660" y="86" width="30" height="22" rx="3"/>
+        </g>
+        <text x="708" y="102" font-size="11" fill="currentColor" opacity="0.7">output tokens</text>
+
+        <!-- ITL brackets -->
+        <line x1="330" y1="122" x2="340" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="370" y1="122" x2="380" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="410" y1="122" x2="420" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="450" y1="122" x2="460" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="490" y1="122" x2="500" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="530" y1="122" x2="540" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="570" y1="122" x2="580" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="610" y1="122" x2="620" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <line x1="650" y1="122" x2="660" y2="122" stroke="var(--series-4)" stroke-width="2"/>
+        <text x="300" y="140" font-size="11" fill="currentColor" opacity="0.75">
+          ITL &mdash; one sample per gap; the <tspan font-weight="650">tail</tspan> is what users feel as stuttering
+        </text>
+
+        <!-- E2E -->
+        <line x1="60" y1="170" x2="700" y2="170" stroke="currentColor" stroke-width="1.5"
+              marker-start="url(#arr2)" marker-end="url(#arr2)"/>
+        <text x="380" y="164" font-size="12" text-anchor="middle" fill="currentColor" font-weight="620">end-to-end latency</text>
+
+        <text x="60" y="206" font-size="11.5" fill="currentColor" opacity="0.8">
+          TPOT = (E2E &minus; TTFT) / (output_tokens &minus; 1)  &#8212;  the mean ITL
+        </text>
+        <text x="60" y="226" font-size="11.5" fill="currentColor" opacity="0.8">
+          goodput = requests/s meeting BOTH a TTFT bound AND an ITL bound
+        </text>
+      </svg>
+      <figcaption>
+        TTFT is one sample per request; ITL is one sample per token. A 128-token
+        response therefore yields 1 TTFT and 127 ITL samples &mdash; which is why ITL
+        percentiles are meaningful on short runs and TTFT percentiles are not.
+      </figcaption>
+    </figure>
+
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Metric</th><th>What it is</th><th>What it feels like</th><th>Driven by</th></tr></thead>
+        <tbody>
+          <tr><td><b>TTFT</b></td><td>send &rarr; first token</td><td>"did it hang?"</td><td>prompt length, queue depth, prefill speed</td></tr>
+          <tr><td><b>ITL</b></td><td>gap between tokens</td><td>"is it stuttering?"</td><td>batch size, scheduler, preemption</td></tr>
+          <tr><td><b>TPOT</b></td><td>mean ITL</td><td>reading speed</td><td>memory bandwidth, batch size</td></tr>
+          <tr><td><b>E2E</b></td><td>send &rarr; last token</td><td>total wait</td><td>all of the above + output length</td></tr>
+          <tr><td><b>Output throughput</b></td><td>generated tok/s</td><td>cost per token</td><td>batch size, quantization</td></tr>
+          <tr><td><b>Goodput</b></td><td>req/s meeting an SLO</td><td><i>actual</i> capacity</td><td>everything</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note warn">
+      <p><strong>Six ways an inference benchmark lies.</strong></p>
+      <p>1. <b>No warmup</b> &mdash; the first request pays for CUDA context, autotuning
+      and graph capture, and can be 10&times; the steady state.<br>
+      2. <b>The client is the bottleneck</b> &mdash; check with Little's Law:
+      throughput &times; latency should equal the concurrency you requested.<br>
+      3. <b>Different output lengths</b> &mdash; without <code>ignore_eos</code> you are
+      measuring verbosity, not speed.<br>
+      4. <b>"Tokens/s" without saying which</b> &mdash; counting prompt tokens makes
+      summarisation look 10&times; faster than chat on identical hardware.<br>
+      5. <b>Closed-loop only</b> &mdash; workers that wait for a response back off
+      automatically, so the server can never fall behind and you never find the cliff.<br>
+      6. <b>Comparing default configs</b> &mdash; SGLang caches prefixes by default;
+      vLLM has not always. That is a flag comparison dressed up as an architecture
+      comparison.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================== BATCHING -->
+<section id="batching">
+  <div class="wrap">
+    <div class="eyebrow">05</div>
+    <h2>Three generations of batching</h2>
+    <p class="section-sub">
+      Encoders need one forward pass per request; decoders need hundreds, and each
+      request finishes at a different time. That difference produced three distinct
+      scheduling designs.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 760 290" role="img" aria-label="Static batching idles slots after short sequences finish; dynamic batching groups arrivals and runs them to completion; continuous batching rebuilds the batch every decode step so new requests join mid-flight.">
+        <!-- STATIC -->
+        <text x="0" y="16" font-size="12.5" font-weight="650" fill="currentColor">Static batching</text>
+        <text x="0" y="32" font-size="11" fill="currentColor" opacity="0.6">the batch runs at the speed of its slowest member</text>
+        <g>
+          <text x="0" y="56" font-size="10.5" fill="currentColor" opacity="0.6">A</text>
+          <rect x="22" y="46" width="90" height="13" rx="3" fill="var(--series-1)"/>
+          <rect x="112" y="46" width="180" height="13" rx="3" fill="currentColor" opacity="0.1"/>
+          <text x="0" y="74" font-size="10.5" fill="currentColor" opacity="0.6">B</text>
+          <rect x="22" y="64" width="200" height="13" rx="3" fill="var(--series-1)"/>
+          <rect x="222" y="64" width="70" height="13" rx="3" fill="currentColor" opacity="0.1"/>
+          <text x="0" y="92" font-size="10.5" fill="currentColor" opacity="0.6">C</text>
+          <rect x="22" y="82" width="270" height="13" rx="3" fill="var(--series-1)"/>
+          <text x="0" y="110" font-size="10.5" fill="currentColor" opacity="0.6">D</text>
+          <rect x="22" y="100" width="55" height="13" rx="3" fill="var(--series-1)"/>
+          <rect x="77" y="100" width="215" height="13" rx="3" fill="currentColor" opacity="0.1"/>
+          <text x="302" y="84" font-size="10.5" fill="currentColor" opacity="0.6">shaded = idle slot,</text>
+          <text x="302" y="98" font-size="10.5" fill="currentColor" opacity="0.6">still burning bandwidth</text>
+        </g>
+
+        <!-- CONTINUOUS -->
+        <text x="0" y="150" font-size="12.5" font-weight="650" fill="currentColor">Continuous batching</text>
+        <text x="0" y="166" font-size="11" fill="currentColor" opacity="0.6">the batch is rebuilt every single decode step</text>
+        <g>
+          <text x="0" y="190" font-size="10.5" fill="currentColor" opacity="0.6">A</text>
+          <rect x="22" y="180" width="90" height="13" rx="3" fill="var(--series-1)"/>
+          <rect x="114" y="180" width="80" height="13" rx="3" fill="var(--series-2)"/>
+          <rect x="196" y="180" width="96" height="13" rx="3" fill="var(--series-3)"/>
+          <text x="0" y="208" font-size="10.5" fill="currentColor" opacity="0.6">B</text>
+          <rect x="22" y="198" width="200" height="13" rx="3" fill="var(--series-1)"/>
+          <rect x="224" y="198" width="68" height="13" rx="3" fill="var(--series-2)"/>
+          <text x="0" y="226" font-size="10.5" fill="currentColor" opacity="0.6">C</text>
+          <rect x="22" y="216" width="270" height="13" rx="3" fill="var(--series-1)"/>
+          <text x="0" y="244" font-size="10.5" fill="currentColor" opacity="0.6">D</text>
+          <rect x="22" y="234" width="55" height="13" rx="3" fill="var(--series-1)"/>
+          <rect x="79" y="234" width="120" height="13" rx="3" fill="var(--series-2)"/>
+          <rect x="201" y="234" width="91" height="13" rx="3" fill="var(--series-3)"/>
+          <text x="302" y="212" font-size="10.5" fill="currentColor" opacity="0.6">colours = different requests;</text>
+          <text x="302" y="226" font-size="10.5" fill="currentColor" opacity="0.6">a finished slot is refilled at the</text>
+          <text x="302" y="240" font-size="10.5" fill="currentColor" opacity="0.6">very next token boundary</text>
+        </g>
+
+        <line x1="22" y1="266" x2="292" y2="266" stroke="currentColor" stroke-width="1" opacity="0.4"/>
+        <text x="157" y="282" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.6">time &rarr;</text>
+      </svg>
+      <figcaption>
+        Static batching wastes every slot whose sequence finished early. Continuous
+        batching (vLLM, SGLang, TensorRT-LLM in-flight batching) admits a waiting
+        request the moment a slot frees, typically a 2&ndash;4&times; throughput win on
+        mixed-length traffic with no change to the model.
+      </figcaption>
+    </figure>
+
+    <div class="grid grid-3" style="margin-top:28px">
+      <div class="card">
+        <h4 style="margin-top:0">No batching</h4>
+        <p style="font-size:14.5px;color:var(--text-secondary);margin:0">
+          One request at a time. The GPU is ~99% idle during decode. This is a
+          <code>transformers</code> loop, and it is the baseline every engine is
+          measured against.</p>
+      </div>
+      <div class="card">
+        <h4 style="margin-top:0">Dynamic batching</h4>
+        <p style="font-size:14.5px;color:var(--text-secondary);margin:0">
+          Wait up to <code>max_queue_delay</code>, group whatever arrived, run it to
+          completion. Correct for <b>encoders</b> &mdash; one pass per request. This is
+          Triton Inference Server's scheduler.</p>
+      </div>
+      <div class="card">
+        <h4 style="margin-top:0">Continuous batching</h4>
+        <p style="font-size:14.5px;color:var(--text-secondary);margin:0">
+          Rebuild the batch every decode step; members join and leave mid-flight.
+          Required for <b>decoders</b>, where requests need wildly different numbers of
+          passes.</p>
+      </div>
+    </div>
+
+    <div class="note">
+      <p><strong>A common misconfiguration.</strong> Putting Triton's dynamic batcher in
+      front of an LLM backend adds queue delay ahead of a scheduler that already does
+      something strictly better. For vLLM or TensorRT-LLM backends, leave
+      <code>dynamic_batching</code> out of <code>config.pbtxt</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ PAGING -->
+<section id="paging">
+  <div class="wrap">
+    <div class="eyebrow">06</div>
+    <h2>Paged KV cache, and sharing prefixes</h2>
+    <p class="section-sub">
+      Two mechanisms that follow directly from the KV-cache arithmetic in section 03.
+      Both are about not storing, and not recomputing, the same thing twice.
+    </p>
+
+    <h3>PagedAttention &mdash; virtual memory for the KV cache</h3>
+    <figure>
+      <svg viewBox="0 0 760 250" role="img" aria-label="Contiguous KV reservation wastes most of each sequence's reserved space; paged allocation assigns 16-token blocks on demand via a per-sequence block table, and two sequences sharing a prefix point at the same physical blocks.">
+        <!-- without paging -->
+        <text x="0" y="16" font-size="12.5" font-weight="650" fill="currentColor">Contiguous reservation</text>
+        <text x="0" y="32" font-size="11" fill="currentColor" opacity="0.6">reserve max_model_len per sequence</text>
+
+        <text x="0" y="60" font-size="10.5" fill="currentColor" opacity="0.6">seq A</text>
+        <rect x="46" y="48" width="38" height="16" rx="2" fill="var(--series-1)"/>
+        <rect x="84" y="48" width="246" height="16" rx="2" fill="currentColor" opacity="0.09"/>
+        <text x="0" y="84" font-size="10.5" fill="currentColor" opacity="0.6">seq B</text>
+        <rect x="46" y="72" width="22" height="16" rx="2" fill="var(--series-2)"/>
+        <rect x="68" y="72" width="262" height="16" rx="2" fill="currentColor" opacity="0.09"/>
+
+        <text x="46" y="110" font-size="11" fill="var(--series-8)" font-weight="620">90%+ of reserved memory never written</text>
+
+        <!-- with paging -->
+        <text x="400" y="16" font-size="12.5" font-weight="650" fill="currentColor">Paged, 16-token blocks</text>
+        <text x="400" y="32" font-size="11" fill="currentColor" opacity="0.6">allocated on demand, shareable</text>
+
+        <text x="400" y="60" font-size="10.5" fill="currentColor" opacity="0.6">physical</text>
+        <g>
+          <rect x="400" y="68" width="34" height="18" rx="3" fill="var(--series-1)"/>
+          <text x="417" y="81" font-size="9.5" text-anchor="middle" fill="var(--surface)">b0</text>
+          <rect x="438" y="68" width="34" height="18" rx="3" fill="var(--series-2)"/>
+          <text x="455" y="81" font-size="9.5" text-anchor="middle" fill="var(--surface)">b1</text>
+          <rect x="476" y="68" width="34" height="18" rx="3" fill="var(--series-2)"/>
+          <text x="493" y="81" font-size="9.5" text-anchor="middle" fill="var(--surface)">b2</text>
+          <rect x="514" y="68" width="34" height="18" rx="3" fill="var(--series-1)"/>
+          <text x="531" y="81" font-size="9.5" text-anchor="middle" fill="var(--surface)">b3</text>
+          <rect x="552" y="68" width="34" height="18" rx="3" fill="currentColor" opacity="0.12"/>
+          <text x="569" y="81" font-size="9.5" text-anchor="middle" fill="currentColor" opacity="0.6">b4</text>
+          <rect x="590" y="68" width="34" height="18" rx="3" fill="currentColor" opacity="0.12"/>
+          <text x="607" y="81" font-size="9.5" text-anchor="middle" fill="currentColor" opacity="0.6">b5</text>
+          <rect x="628" y="68" width="34" height="18" rx="3" fill="var(--series-1)"/>
+          <text x="645" y="81" font-size="9.5" text-anchor="middle" fill="var(--surface)">b6</text>
+        </g>
+
+        <text x="400" y="112" font-size="10.5" fill="currentColor" opacity="0.6">block tables</text>
+        <text x="400" y="132" font-size="11" fill="var(--series-1)">seq A &rarr; b0, b3, b6</text>
+        <text x="400" y="150" font-size="11" fill="var(--series-2)">seq B &rarr; b1, b2</text>
+        <text x="400" y="172" font-size="11" fill="currentColor" opacity="0.6">free list &rarr; b4, b5 &#8230; reusable immediately</text>
+
+        <line x1="0" y1="196" x2="760" y2="196" stroke="currentColor" stroke-width="1" opacity="0.15"/>
+        <text x="0" y="218" font-size="11.5" fill="currentColor" opacity="0.8">
+          Worst-case waste drops from thousands of tokens per sequence to 15.
+        </text>
+        <text x="0" y="238" font-size="11.5" fill="currentColor" opacity="0.8">
+          And because blocks are indirect, two sequences can point at the <tspan font-weight="650">same</tspan> physical block &mdash; which is prefix caching.
+        </text>
+      </svg>
+      <figcaption>
+        The block table is an indirection on every attention read, so it needs a custom
+        kernel &mdash; you cannot express it in stock PyTorch attention. That kernel is
+        what "PagedAttention" names.
+      </figcaption>
+    </figure>
+
+    <h3>RadixAttention &mdash; prefix sharing as a tree</h3>
+    <p>
+      vLLM hashes blocks: <em>does this exact block of tokens already exist?</em>
+      SGLang keeps the cache in a <strong>radix tree</strong> keyed on token sequences,
+      which additionally handles partial matches, nested matches, and
+      <strong>branching</strong> &mdash; agent retries, beam search, self-consistency
+      sampling all fork from a common ancestor.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 760 260" role="img" aria-label="A radix tree where a shared system prompt is the root, two user turns branch from it, and two assistant variants branch from one turn, so each run of tokens is computed only once.">
+        <defs>
+          <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <rect x="20" y="108" width="150" height="40" rx="5" fill="var(--series-2)" opacity="0.92"/>
+        <text x="95" y="126" font-size="11" text-anchor="middle" fill="var(--surface)" font-weight="620">system prompt</text>
+        <text x="95" y="140" font-size="10" text-anchor="middle" fill="var(--surface)" opacity="0.85">40 tokens &#183; computed ONCE</text>
+
+        <line x1="170" y1="120" x2="240" y2="68" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr3)" opacity="0.7"/>
+        <line x1="170" y1="136" x2="240" y2="196" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr3)" opacity="0.7"/>
+
+        <rect x="244" y="48" width="140" height="36" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="314" y="65" font-size="11" text-anchor="middle" fill="currentColor">"what is 17&times;23?"</text>
+        <text x="314" y="78" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.6">turn 1</text>
+
+        <rect x="244" y="178" width="140" height="36" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="314" y="195" font-size="11" text-anchor="middle" fill="currentColor">"search for X"</text>
+        <text x="314" y="208" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.6">a different turn 1</text>
+
+        <line x1="384" y1="66" x2="444" y2="66" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr3)" opacity="0.7"/>
+        <rect x="448" y="48" width="150" height="36" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <text x="523" y="65" font-size="11" text-anchor="middle" fill="currentColor">tool call &rarr; 391</text>
+        <text x="523" y="78" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.6">turn 2</text>
+
+        <line x1="598" y1="58" x2="650" y2="30" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr3)" opacity="0.7"/>
+        <line x1="598" y1="74" x2="650" y2="102" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr3)" opacity="0.7"/>
+        <rect x="654" y="14" width="96" height="30" rx="5" fill="var(--series-1)" opacity="0.9"/>
+        <text x="702" y="33" font-size="10.5" text-anchor="middle" fill="var(--surface)">branch A</text>
+        <rect x="654" y="88" width="96" height="30" rx="5" fill="var(--series-1)" opacity="0.9"/>
+        <text x="702" y="107" font-size="10.5" text-anchor="middle" fill="var(--surface)">branch B (retry)</text>
+
+        <text x="20" y="238" font-size="11.5" fill="currentColor" opacity="0.8">
+          Every node is a run of tokens whose KV blocks exist once. A new request walks down from the root
+        </text>
+        <text x="20" y="254" font-size="11.5" fill="currentColor" opacity="0.8">
+          and pays only for the tokens below its deepest matching node. LRU eviction removes leaves first, so the shared trunk survives.
+        </text>
+      </svg>
+      <figcaption>
+        On a workload with <em>no</em> shared prefix the tree is pure overhead and SGLang
+        and vLLM land within noise of each other. Prefix reuse is a property of your
+        workload, not of the engine &mdash; which is the single biggest reason published
+        engine comparisons disagree.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ================================================================= QUANT -->
+<section id="quant">
+  <div class="wrap">
+    <div class="eyebrow">07</div>
+    <h2>Quantization: where the bits should go</h2>
+    <p class="section-sub">
+      Decode is bandwidth-bound, so making the weights smaller makes decode faster
+      almost proportionally. The art is deciding which weights absorb the error.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 760 210" role="img" aria-label="A GGUF K-quant super-block of 256 weights holds two fp16 super-block scales, eight 6-bit sub-block scale and minimum pairs, and 256 four-bit quantized values, totalling 144 bytes or 4.5 bits per weight.">
+        <text x="0" y="16" font-size="12.5" font-weight="650" fill="currentColor">A Q4_K super-block &mdash; 256 weights in 144 bytes</text>
+
+        <rect x="0" y="34" width="92" height="40" rx="4" fill="var(--series-4)" opacity="0.9"/>
+        <text x="46" y="51" font-size="10.5" text-anchor="middle" fill="var(--surface)" font-weight="620">fp16 d</text>
+        <text x="46" y="65" font-size="10.5" text-anchor="middle" fill="var(--surface)" font-weight="620">fp16 dmin</text>
+
+        <rect x="100" y="34" width="228" height="40" rx="4" fill="var(--series-5)" opacity="0.9"/>
+        <text x="214" y="51" font-size="10.5" text-anchor="middle" fill="var(--surface)" font-weight="620">8 &times; (6-bit scale, 6-bit min)</text>
+        <text x="214" y="65" font-size="10.5" text-anchor="middle" fill="var(--surface)" font-weight="620">one pair per 32-weight sub-block</text>
+
+        <rect x="336" y="34" width="424" height="40" rx="4" fill="var(--series-1)" opacity="0.9"/>
+        <text x="548" y="58" font-size="11" text-anchor="middle" fill="var(--surface)" font-weight="620">256 &times; 4-bit quantized values</text>
+
+        <text x="0" y="92" font-size="10.5" fill="currentColor" opacity="0.6">4 bytes</text>
+        <text x="100" y="92" font-size="10.5" fill="currentColor" opacity="0.6">12 bytes</text>
+        <text x="336" y="92" font-size="10.5" fill="currentColor" opacity="0.6">128 bytes</text>
+
+        <line x1="0" y1="110" x2="760" y2="110" stroke="currentColor" stroke-width="1" opacity="0.15"/>
+
+        <text x="0" y="134" font-size="12.5" font-weight="650" fill="currentColor">Why two levels of scale</text>
+        <text x="0" y="154" font-size="11.5" fill="currentColor" opacity="0.8">
+          One shared scale across 256 weights would be dominated by outliers. Per-32 scales track local magnitude,
+        </text>
+        <text x="0" y="170" font-size="11.5" fill="currentColor" opacity="0.8">
+          and quantizing those scales against a super-block scale keeps the overhead to 0.5 bits per weight.
+        </text>
+        <text x="0" y="192" font-size="11.5" fill="currentColor" opacity="0.8">
+          Storing a <tspan font-weight="650">minimum</tspan> as well as a scale maps each sub-block onto an affine range rather than a symmetric one &mdash; weights are not centred on zero.
+        </text>
+      </svg>
+      <figcaption>
+        The <code>_M</code> in <code>Q4_K_M</code> is a <em>recipe</em>, not a bit width:
+        attention value projections and FFN down-projections get Q6_K while the rest get
+        Q4_K, and the norms stay fp32. Bits go where the sensitivity is, not where the
+        parameters are.
+      </figcaption>
+    </figure>
+
+    <div class="grid grid-2">
+      <div class="card">
+        <h4 style="margin-top:0">GGUF (llama.cpp)</h4>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Quant</th><th class="num">bits/wt</th><th>Use when</th></tr></thead>
+            <tbody>
+              <tr><td>F16</td><td class="num">16.0</td><td>quality reference</td></tr>
+              <tr><td>Q8_0</td><td class="num">8.5</td><td>effectively lossless</td></tr>
+              <tr><td>Q6_K</td><td class="num">6.6</td><td>very close to Q8</td></tr>
+              <tr><td><b>Q5_K_M</b></td><td class="num">5.7</td><td>best quality/size</td></tr>
+              <tr><td><b>Q4_K_M</b></td><td class="num">4.9</td><td><b>the default pick</b></td></tr>
+              <tr><td>Q3_K_M</td><td class="num">3.9</td><td>degradation starts</td></tr>
+              <tr><td>IQ2_XXS</td><td class="num">2.1</td><td>last resort to fit</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h4 style="margin-top:0">GPU-side schemes</h4>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Scheme</th><th>Needs</th><th>Helps</th></tr></thead>
+            <tbody>
+              <tr><td><b>FP8</b> (e4m3)</td><td>sm_89+</td><td>both phases; halves KV too</td></tr>
+              <tr><td><b>INT8</b> SmoothQuant</td><td>sm_80+, calibration</td><td>prefill (compute-bound)</td></tr>
+              <tr><td><b>INT4 AWQ</b></td><td>sm_80+</td><td><b>decode</b> (weight-only)</td></tr>
+              <tr><td><b>INT4 GPTQ</b></td><td>sm_80+</td><td><b>decode</b> (weight-only)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="verdict" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);font-size:14px;color:var(--text-secondary)">
+          Weight-only 4-bit transforms decode and does almost nothing for prefill &mdash;
+          prefill was never waiting on weight bytes.
+        </div>
+      </div>
+    </div>
+
+    <div class="note key">
+      <p><strong>The result that surprises people.</strong> Round-to-nearest 4-bit
+      quantization of roughly Gaussian weights has a floor of about
+      <b>10% relative error</b>, and that error does <em>not</em> average away in the
+      matmul &mdash; signal and error both grow as &radic;K, so the relative error is
+      preserved. 4-bit models work not because the arithmetic error is small, but
+      because trained transformers are robust to it. That is an empirical property, which
+      is why quantization quality must be <em>measured</em> rather than assumed.</p>
+      <p style="margin-bottom:0">AWQ, GPTQ and llama.cpp's importance matrix all beat that
+      floor the same way: not by rounding better, but by choosing <em>which weights
+      absorb the error</em>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================== ENGINES -->
+<section id="engines">
+  <div class="wrap">
+    <div class="eyebrow">08</div>
+    <h2>The engines</h2>
+    <p class="section-sub">
+      Four engines and one serving layer. The most common mistake is treating Triton as
+      a fifth engine &mdash; it is the thing that runs the others.
+    </p>
+
+    <div class="grid grid-2">
+      <div class="card engine-card">
+        <div class="kind">Inference engine</div>
+        <h3><span class="swatch" style="background:var(--series-1)"></span>vLLM</h3>
+        <ul>
+          <li>PagedAttention, continuous batching, prefix caching, chunked prefill</li>
+          <li>Widest model coverage; usually supports new architectures first</li>
+          <li>Biggest ecosystem &mdash; most tooling assumes it</li>
+        </ul>
+        <div class="verdict"><b>Choose when</b> you want excellent throughput on an
+          OpenAI-compatible API without compiling anything. The sane default.</div>
+      </div>
+
+      <div class="card engine-card">
+        <div class="kind">Inference engine</div>
+        <h3><span class="swatch" style="background:var(--series-2)"></span>SGLang</h3>
+        <ul>
+          <li>RadixAttention &mdash; prefix sharing as a tree, not a hash table</li>
+          <li>Zero-overhead scheduler: CPU work overlaps GPU compute</li>
+          <li>Fast grammar-constrained output; a frontend DSL for multi-call programs</li>
+        </ul>
+        <div class="verdict"><b>Choose when</b> prompts branch or share long prefixes:
+          agents, multi-turn sessions, self-consistency sampling.</div>
+      </div>
+
+      <div class="card engine-card">
+        <div class="kind">Inference engine</div>
+        <h3><span class="swatch" style="background:var(--series-3)"></span>llama.cpp / GGUF</h3>
+        <ul>
+          <li>Runs on CPU, Apple Silicon, AMD, Intel &mdash; not just NVIDIA</li>
+          <li>Partial GPU offload: the model need not fit in VRAM</li>
+          <li>One static binary; the whole model in one file</li>
+        </ul>
+        <div class="verdict"><b>Choose when</b> there is no datacenter GPU, the model
+          does not fit, or you are serving one local user.</div>
+      </div>
+
+      <div class="card engine-card">
+        <div class="kind">Inference engine</div>
+        <h3><span class="swatch" style="background:var(--series-4)"></span>TensorRT-LLM</h3>
+        <ul>
+          <li>Ahead-of-time compilation: fusion + autotuning for your exact GPU</li>
+          <li>Lowest TTFT and batch-1 latency on NVIDIA hardware</li>
+          <li>Engines are not portable; shape bounds are compile-time constants</li>
+        </ul>
+        <div class="verdict"><b>Choose when</b> latency is the product, the model is
+          stable, and you have CI to manage engine artifacts.</div>
+      </div>
+
+      <div class="card engine-card" style="grid-column:1/-1">
+        <div class="kind">Serving layer &mdash; not an engine</div>
+        <h3><span class="swatch" style="background:var(--series-5)"></span>Triton Inference Server</h3>
+        <ul>
+          <li>Hosts many models and many frameworks behind one API, on one GPU</li>
+          <li>Dynamic batching for models that cannot batch themselves (encoders)</li>
+          <li>Ensembles and BLS keep a pipeline server-side; versioning, metrics, k8s</li>
+        </ul>
+        <div class="verdict"><b>Choose when</b> you have model <em>variety</em>, not just
+          model scale. For one LLM and one framework it is overhead with no benefit.</div>
+      </div>
+    </div>
+
+    <h3>Encoders are a different problem entirely</h3>
+    <p>
+      Half of real inference is classification, embedding and reranking. An encoder does
+      <strong>one forward pass per request</strong> &mdash; no autoregressive loop, no KV
+      cache. PagedAttention, continuous batching and prefix caching all become irrelevant,
+      and TTFT/TPOT are undefined.
+    </p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th></th><th>Encoder (BERT, E5, BGE)</th><th>Decoder (Qwen, Llama)</th></tr></thead>
+        <tbody>
+          <tr><td>Forward passes / request</td><td><b>1</b></td><td>1 + output_len</td></tr>
+          <tr><td>KV cache</td><td><b>none needed</b></td><td>dominant memory cost</td></tr>
+          <tr><td>Headline metrics</td><td>latency &amp; throughput vs batch</td><td>TTFT, TPOT, goodput</td></tr>
+          <tr><td>Biggest win</td><td><b>length-sorted batching</b></td><td>continuous batching</td></tr>
+          <tr><td>Right stack</td><td>ONNX Runtime, TensorRT, Triton</td><td>vLLM, SGLang, TensorRT-LLM</td></tr>
+          <tr><td>Typical size</td><td>22M &ndash; 300M</td><td>0.5B &ndash; 70B+</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      If the output comes from a <strong>fixed set</strong> &mdash; a label, a score, a
+      vector &mdash; an encoder is probably right and is 10&ndash;100&times; cheaper. If
+      the output is <strong>open-ended</strong>, you need a decoder. The mature answer is
+      usually both: prototype with the decoder, distil into an encoder, keep the decoder
+      for the long tail.
+    </p>
+  </div>
+</section>
+
+<!-- =============================================================== RESULTS -->
+<section id="results">
+  <div class="wrap">
+    <div class="eyebrow">09</div>
+    <h2>Measured results</h2>
+    <p class="section-sub">
+      Live from <code>docs/data/results.json</code>, regenerated by
+      <code>python -m bench.aggregate</code> after you run the notebooks. Everything here
+      comes from one harness driving every engine over the same streaming HTTP path.
+    </p>
+
+    <div id="results-status"></div>
+
+    <div id="results-ui" hidden>
+      <div class="controls">
+        <div class="control">
+          <label for="res-gpu">GPU</label>
+          <select id="res-gpu"></select>
+        </div>
+        <div class="control">
+          <label for="res-workload">Workload</label>
+          <select id="res-workload"></select>
+        </div>
+        <div class="control">
+          <label for="res-metric">Metric</label>
+          <select id="res-metric">
+            <option value="output_throughput_tok_s">Output throughput (tok/s)</option>
+            <option value="ttft_s_p99">p99 TTFT (ms)</option>
+            <option value="ttft_s_p50">p50 TTFT (ms)</option>
+            <option value="tpot_s_mean">Mean TPOT (ms)</option>
+            <option value="itl_s_p99">p99 inter-token latency (ms)</option>
+            <option value="goodput_req_s">Goodput (req/s)</option>
+            <option value="usd_per_mtok">Cost per 1M output tokens (USD)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="chart-title" id="sweep-title">Metric vs concurrency</span>
+            <button class="toggle-table" data-table="sweep-table">Table</button>
+          </div>
+          <div class="chart-body"><div id="sweep-chart"></div></div>
+          <div class="legend" id="sweep-legend"></div>
+          <div id="sweep-table" hidden></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="chart-title">Throughput vs tail latency</span>
+            <span class="chart-note">up-and-left is better</span>
+          </div>
+          <div class="chart-body"><div id="pareto-chart"></div></div>
+          <div class="legend" id="pareto-legend"></div>
+        </div>
+      </div>
+
+      <div class="chart-card" style="margin-top:16px">
+        <div class="chart-head">
+          <span class="chart-title" id="best-title">Best operating point per engine</span>
+          <button class="toggle-table" data-table="best-table">Table</button>
+        </div>
+        <div class="chart-body"><div id="best-chart"></div></div>
+        <div id="best-table" hidden></div>
+      </div>
+
+      <p class="chart-note" id="results-meta" style="margin-top:14px"></p>
+    </div>
+
+    <div class="note warn" style="margin-top:26px">
+      <p><strong>Limitations, stated plainly.</strong> These runs use a 0.5B model on a
+      single shared Colab GPU with 64&ndash;96 requests per point. That means: small
+      models exaggerate scheduler overhead and flatter lean engines; p99 figures are
+      noisy at this sample count; thermal variation on shared hardware makes differences
+      under ~10% meaningless without repeats; and every engine here could be tuned
+      further by a specialist. Several rankings plausibly <em>invert</em> at 7B+ where
+      each forward pass is long enough that scheduling differences vanish. Treat the
+      <em>shapes</em> as the lesson, not the absolute numbers.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ DECIDE -->
+<section id="decide">
+  <div class="wrap">
+    <div class="eyebrow">10</div>
+    <h2>Which should you use?</h2>
+    <p class="section-sub">
+      Benchmarks go stale; the reasoning does not. Answer four questions.
+    </p>
+
+    <div class="card tree">
+      <div class="tree-path" id="tree-path"></div>
+      <div id="tree-body"></div>
+      <button class="toggle-table" id="tree-reset" style="margin-top:18px" hidden>Start over</button>
+    </div>
+
+    <h3>Things that are true regardless of engine</h3>
+    <ol>
+      <li><strong>Your workload shape decides more than your engine choice.</strong>
+        Turning prefix caching on or off moves TTFT more than any engine-vs-engine
+        difference at matched settings.</li>
+      <li><strong>Quantization is usually the biggest single lever</strong>, and it is
+        engine-independent.</li>
+      <li><strong>Deploy at the goodput peak, not the throughput peak.</strong> They are
+        different concurrencies, and the gap is where "great benchmark, unhappy users"
+        lives.</li>
+      <li><strong>Measure your own prompt distribution.</strong> Every number on this
+        page is specific to one model, one GPU and one set of lengths.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- =============================================================== KERNELS -->
+<section id="kernels">
+  <div class="wrap">
+    <div class="eyebrow">11</div>
+    <h2>Making one faster: how to pick the kernel</h2>
+    <p class="section-sub">
+      The part people skip. Three questions, in order &mdash; skipping any of them is how
+      a week goes into making something 3&times; faster that was 2% of runtime.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 760 250" role="img" aria-label="Decision flow: profile to find the hot kernel, compute its arithmetic intensity to find which roof it is under, then branch to byte-reducing fixes if memory-bound or math fixes if compute-bound, and check headroom against peak.">
+        <defs>
+          <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <rect x="270" y="8" width="220" height="40" rx="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="380" y="26" font-size="12" text-anchor="middle" fill="currentColor" font-weight="620">1. Profile the real workload</text>
+        <text x="380" y="40" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.65">what is &gt;10% of the step?</text>
+
+        <line x1="380" y1="48" x2="380" y2="72" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr4)"/>
+
+        <rect x="270" y="76" width="220" height="40" rx="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="380" y="94" font-size="12" text-anchor="middle" fill="currentColor" font-weight="620">2. Which roof is it under?</text>
+        <text x="380" y="108" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.65">FLOP/byte vs the ridge point</text>
+
+        <line x1="270" y1="96" x2="180" y2="96" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr4)"/>
+        <line x1="490" y1="96" x2="580" y2="96" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr4)"/>
+        <text x="224" y="90" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.6">memory</text>
+        <text x="535" y="90" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.6">compute</text>
+
+        <rect x="10" y="118" width="168" height="76" rx="6" fill="var(--series-1)" opacity="0.12" stroke="var(--series-1)" stroke-width="1.4"/>
+        <text x="94" y="136" font-size="11.5" text-anchor="middle" fill="currentColor" font-weight="620">Move fewer bytes</text>
+        <text x="94" y="153" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.75">quantize weights / KV</text>
+        <text x="94" y="168" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.75">fuse neighbouring ops</text>
+        <text x="94" y="183" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.75">fix memory layout</text>
+
+        <rect x="582" y="118" width="168" height="76" rx="6" fill="var(--series-2)" opacity="0.12" stroke="var(--series-2)" stroke-width="1.4"/>
+        <text x="666" y="136" font-size="11.5" text-anchor="middle" fill="currentColor" font-weight="620">Do faster math</text>
+        <text x="666" y="153" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.75">tensor cores</text>
+        <text x="666" y="168" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.75">bigger tiles</text>
+        <text x="666" y="183" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.75">narrower dtype</text>
+
+        <line x1="178" y1="156" x2="268" y2="186" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr4)" opacity="0.7"/>
+        <line x1="582" y1="156" x2="492" y2="186" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr4)" opacity="0.7"/>
+
+        <rect x="270" y="178" width="220" height="40" rx="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="380" y="196" font-size="12" text-anchor="middle" fill="currentColor" font-weight="620">3. How much headroom?</text>
+        <text x="380" y="210" font-size="10.5" text-anchor="middle" fill="currentColor" opacity="0.65">achieved &divide; peak &mdash; high means stop</text>
+
+        <text x="380" y="242" font-size="11" text-anchor="middle" fill="currentColor" opacity="0.6">
+          Both low? Neither roof &mdash; you are latency-bound. Raise occupancy and parallelism.
+        </text>
+      </svg>
+      <figcaption>
+        Applying a compute-bound fix to a memory-bound kernel does nothing. This is the
+        most common form of wasted GPU optimisation effort.
+      </figcaption>
+    </figure>
+
+    <h3>The worked example</h3>
+    <p>
+      Profile a decode step on a small model and the budget is dominated by
+      <strong>linear layers</strong>. At batch 1 those are not matmuls at all &mdash; they
+      are matrix-<em>vector</em> products at ~1 FLOP/byte, already running near peak
+      bandwidth. cuBLAS is doing fine; there is no tuning win. The only lever is
+      <strong>fewer bytes</strong>, so notebook 08 writes a fused int4
+      dequantize-and-multiply kernel in Triton:
+    </p>
+    <pre><code>fp16 weights:  K &times; N &times; 2 bytes
+int4 weights:  K &times; N / 2  +  2 &times; (K/128) &times; N &times; 2    &rarr;  ~3.8&times; less traffic</code></pre>
+    <p>
+      The dequantized values <strong>never touch HBM</strong> &mdash; they exist only in
+      registers. A version that dequantizes into a buffer and then calls cuBLAS is
+      <em>slower</em> than fp16, because it moves all the original bytes plus the int4
+      ones. Fusion is not an optimisation here; it is the entire point.
+    </p>
+
+    <div class="note">
+      <p><strong>Try things in this order</strong>, highest expected value first:
+      batching and scheduler config (free, usually the biggest win) &rarr; quantization
+      (hours, 2&ndash;4&times; on decode) &rarr; prefix caching if the workload shares
+      prefixes (free when it applies) &rarr; a different engine (days, modest factor)
+      &rarr; custom kernels (weeks, targeted). Custom kernels are last because they are
+      the most fun and the least leveraged &mdash; which is exactly why it is worth
+      knowing how to tell when you have genuinely reached that point.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="eyebrow">The notebooks</div>
+    <h2>Run it yourself</h2>
+    <p class="section-sub">
+      Each notebook is self-contained and opens in Colab. Results land in
+      <code>results/</code> in a shared schema; <code>python -m bench.aggregate</code>
+      republishes this page's charts.
+    </p>
+    <div class="anchor-list">
+      <a data-nb="00_foundations_and_setup.ipynb">00 &mdash; Foundations: what you are measuring</a>
+      <a data-nb="01_vllm_deep_dive.ipynb">01 &mdash; vLLM: continuous batching &amp; paging</a>
+      <a data-nb="02_sglang_deep_dive.ipynb">02 &mdash; SGLang: RadixAttention</a>
+      <a data-nb="03_llamacpp_gguf.ipynb">03 &mdash; llama.cpp &amp; GGUF quantization</a>
+      <a data-nb="04_tensorrt_llm.ipynb">04 &mdash; TensorRT-LLM: compiled engines</a>
+      <a data-nb="05_triton_inference_server.ipynb">05 &mdash; Triton: dynamic batching</a>
+      <a data-nb="06_encoder_models_bert.ipynb">06 &mdash; Encoders vs decoders</a>
+      <a data-nb="07_comparison.ipynb">07 &mdash; The comparison</a>
+      <a data-nb="08_kernel_optimization.ipynb">08 &mdash; Kernel profiling &amp; Triton</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>
+      A learning project. Every number is reproducible from the notebooks in this
+      repository; every claim not backed by a measurement is derived from the hardware
+      model in section 02. Where a result is illustrative rather than measured, it is
+      marked.
+    </p>
+    <p id="footer-meta"></p>
+  </div>
+</footer>
+
+<script type="module" src="assets/site.js"></script>
+</body>
+</html>

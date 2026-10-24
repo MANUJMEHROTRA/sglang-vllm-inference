@@ -1,0 +1,49 @@
+# Dependencies for the notebooks, in the order they are needed.
+#
+# DELIBERATELY UNPINNED for the engines. vLLM, SGLang and TensorRT-LLM each
+# pin their own torch build, and pinning them here is how you get an
+# unresolvable conflict on a Colab runtime whose torch was updated last week.
+# Instead: install the latest, then let the notebook RECORD what it actually
+# got into the result file (`bench.package_versions`). Provenance beats
+# pinning for a study project -- a result that names its engine version stays
+# interpretable; a pin that no longer resolves just blocks you.
+#
+# Known-good versions at the time of writing, for reference if you need to
+# reproduce a specific number:
+#   vllm            0.32.0
+#   sglang          0.5.22
+#   tensorrt_llm    1.2.1
+#   llama-cpp-python 0.3.36   (we build llama.cpp from source instead)
+#
+# Install only what a given notebook needs -- vLLM and SGLang pull conflicting
+# torch builds and should NOT share a runtime. Restart the runtime between
+# notebooks 01 and 02.
+
+# --- the shared harness (all notebooks) ---
+aiohttp>=3.9
+nest_asyncio>=1.6
+matplotlib>=3.7
+pandas>=2.0
+
+# --- model loading and tokenizers (all notebooks) ---
+transformers>=4.44
+accelerate>=0.33
+huggingface_hub>=0.24
+
+# --- notebook 03: GGUF inspection and perplexity corpus ---
+gguf>=0.10
+datasets>=2.20
+
+# --- notebooks 05, 06: encoder serving ---
+onnx>=1.16
+onnxruntime>=1.18          # or onnxruntime-gpu on a CUDA runtime
+sentence-transformers>=3.0
+
+# --- notebook 08: kernel work ---
+triton>=3.0                # ships with torch on CUDA; listed for clarity
+
+# --- engines: install ONE PER RUNTIME, in the notebook that needs it ---
+# vllm                     # notebook 01
+# sglang[all]              # notebook 02
+# tensorrt_llm             # notebook 04  (sm_80+; several GB)
+# llama.cpp is built from source in notebook 03 (cmake -DGGML_CUDA=ON)

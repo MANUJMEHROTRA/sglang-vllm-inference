@@ -1,0 +1,16 @@
+{
+ "schema_version": "1.0",
+ "generated_at": 1792814951.733506,
+ "generated_at_iso": "2026-10-24 04:09:11 UTC",
+ "default_slo": {
+  "ttft_s": 1.0,
+  "p99_itl_s": 0.05
+ },
+ "counts": {
+  "total": 0,
+  "measured": 0,
+  "synthetic": 0
+ },
+ "facets": {},
+ "runs": []
+}
