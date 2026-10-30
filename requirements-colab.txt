@@ -25,10 +25,17 @@ nest_asyncio>=1.6
 matplotlib>=3.7
 pandas>=2.0
 
-# --- model loading and tokenizers (all notebooks) ---
+# --- token counting (all notebooks) ---
+# The Rust tokenizer. bench.load_tokenizer prefers this over transformers
+# because it imports NO torch: the engine notebooks drive a server over HTTP
+# and must not be breakable by whatever torch build the engine just pinned.
+tokenizers>=0.23
+huggingface_hub>=0.24
+
+# --- model loading: notebooks 00 and 06 ONLY (they load models locally;
+#     they do not install an engine, so the torch clash cannot bite them) ---
 transformers>=4.44
 accelerate>=0.33
-huggingface_hub>=0.24
 
 # --- notebook 03: GGUF inspection and perplexity corpus ---
 gguf>=0.10

@@ -31,9 +31,11 @@ from .schema import (
 )
 from .servers import (
     free_gpu,
+    install_engine,
     kill_stale,
     llamacpp_cmd,
     print_log,
+    restart_runtime,
     serve,
     sglang_cmd,
     trtllm_cmd,
@@ -45,8 +47,11 @@ from .sysinfo import (
     capture,
     gpu_specs_for,
     package_versions,
+    print_torch_health,
     summary_line,
+    torch_health,
 )
+from .tokenizer import as_tokenizer, load_tokenizer
 from .workloads import PromptBuilder, describe, preset
 
 __all__ = [
@@ -62,6 +67,7 @@ __all__ = [
     "RunResult",
     "WorkloadSpec",
     "arithmetic_intensity",
+    "as_tokenizer",
     "benchmark",
     "capability_report",
     "capture",
@@ -70,16 +76,20 @@ __all__ = [
     "free_gpu",
     "goodput",
     "gpu_specs_for",
+    "install_engine",
     "kill_stale",
     "littles_law_concurrency",
     "llamacpp_cmd",
     "load_dir",
+    "load_tokenizer",
     "package_versions",
     "percentile",
     "preset",
     "print_log",
+    "print_torch_health",
     "probe",
     "report",
+    "restart_runtime",
     "roofline_decode_tok_s",
     "run",
     "serve",
@@ -88,6 +98,7 @@ __all__ = [
     "summarize",
     "summary_line",
     "sweep_concurrency",
+    "torch_health",
     "trtllm_cmd",
     "validate",
     "vllm_cmd",

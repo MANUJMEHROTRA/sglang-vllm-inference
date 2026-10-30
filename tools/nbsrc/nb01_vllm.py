@@ -75,11 +75,48 @@ request for a lot of ITL stability on everyone else.
 > into every result file.
 """),
 
-    code('''
-# vLLM pulls a large dependency tree and a matching torch build. Expect 3-6
-# minutes on a cold Colab runtime.
-%pip install -q vllm
+    md("""
+### A word about the install
 
+vLLM pins an **exact** torch build (`torch==2.13.0` for 0.32.0). Colab ships a
+different one, so `pip install vllm` swaps torch underneath the running
+kernel. Two things then go wrong unless you restart:
+
+1. The old torch module objects are already in memory, so the process keeps
+   using them whatever is now on disk.
+2. If the swap was partial -- some files replaced, some left behind -- torch
+   starts failing to import *its own* internals:
+
+   ```
+   ImportError: cannot import name '_chunk_or_narrow_cat' from 'torch._utils'
+   ```
+
+That traceback surfaces from deep inside `transformers` and looks like a
+transformers bug. It is not: a self-consistent torch release never fails to
+import its own helpers. Chasing transformers versions will not fix it; the
+remedy is a clean torch reinstall plus a restart, and `print_torch_health()`
+below prints it for you.
+"""),
+
+    code('''
+# Expect 3-6 minutes on a cold runtime. install_engine() reports whether torch
+# moved, so a swap is caught here rather than diagnosed later from a traceback
+# inside a library that did nothing wrong.
+from bench import install_engine, print_torch_health, restart_runtime
+
+TORCH_CHANGED = install_engine("vllm", engine_name="vllm")
+'''),
+
+    code('''
+# Gate on a healthy torch before going any further.
+if not print_torch_health("vllm"):
+    raise SystemExit("torch install is inconsistent -- see the remedy above")
+
+if TORCH_CHANGED:
+    restart_runtime("torch was swapped by the vLLM install.")
+'''),
+
+    code('''
 from bench import package_versions
 VERSIONS = package_versions("vllm", "torch", "transformers", "flashinfer-python")
 for name, v in VERSIONS.items():
@@ -89,17 +126,21 @@ for name, v in VERSIONS.items():
     code('''
 import asyncio
 from bench import (EndpointConfig, EngineSpec, PromptBuilder, describe,
-                   free_gpu, kill_stale, preset, run, serve, sweep_concurrency,
-                   vllm_cmd)
+                   free_gpu, kill_stale, load_tokenizer, preset, run, serve,
+                   sweep_concurrency, vllm_cmd)
 from bench.plots import save, use_theme
-from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
 
 use_theme()
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 PORT = 8000
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+# load_tokenizer uses the Rust `tokenizers` package, NOT transformers. This
+# notebook drives vLLM over HTTP and needs a tokenizer only to build prompts
+# of an exact token length -- importing transformers (and therefore all of
+# torch) into the client process to count tokens would be asking for the
+# dependency clash described above, for no benefit.
+tokenizer = load_tokenizer(MODEL_ID)
 builder = PromptBuilder(tokenizer, seed=0)
 
 # A T4 has 16 GB and no bf16. Keep max_model_len modest so the KV cache can

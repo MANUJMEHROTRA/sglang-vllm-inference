@@ -144,7 +144,9 @@ else:                                              # local checkout
 sys.path.insert(0, str(ROOT))
 print("working directory:", Path.cwd())
 
-%pip install -q aiohttp nest_asyncio matplotlib pandas
+# `tokenizers` is the Rust tokenizer (no torch); bench.load_tokenizer prefers
+# it so the engine notebooks never import transformers just to count tokens.
+%pip install -q aiohttp nest_asyncio matplotlib pandas tokenizers huggingface_hub
 '''
 
 BANNER_CODE = '''

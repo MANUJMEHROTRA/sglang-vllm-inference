@@ -139,6 +139,71 @@ def stop(proc: subprocess.Popen, grace_s: float = 20.0) -> None:
         proc.wait(timeout=10)
 
 
+def restart_runtime(reason: str = "") -> None:
+    """Restart the Colab/Jupyter kernel.
+
+    Mandatory after any pip install that changes torch. Two separate things go
+    wrong otherwise, and they compound:
+
+    1. The old torch module objects are already loaded in memory, so the
+       process keeps using them regardless of what is now on disk.
+    2. If the swap was partial, the on-disk torch is a mix of two versions and
+       imports of its own internals fail.
+
+    A restart fixes (1) outright and makes (2) visible immediately instead of
+    three cells later. Re-run the notebook from the top afterwards -- every
+    install cell is idempotent, so the second pass is fast.
+    """
+    if reason:
+        print(reason)
+    print("Restarting the runtime. Re-run from the top when it comes back "
+          "(installs are already done, so it will be quick).")
+    try:
+        import IPython  # noqa: PLC0415
+
+        IPython.Application.instance().kernel.do_shutdown(True)
+    except Exception:  # noqa: BLE001 - not in a kernel; fall back to a hard exit
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def install_engine(pip_spec: str, engine_name: Optional[str] = None) -> bool:
+    """``pip install`` an engine and report whether torch moved underneath us.
+
+    Returns True when the runtime needs restarting. Engine notebooks use this
+    instead of a bare ``%pip install`` so that a torch swap is detected at the
+    moment it happens rather than diagnosed later from a traceback inside
+    whichever library imported torch first.
+    """
+    import importlib.metadata as md  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    def version_of(pkg: str) -> Optional[str]:
+        try:
+            return md.version(pkg)
+        except md.PackageNotFoundError:
+            return None
+
+    before = version_of("torch")
+    print(f"torch before install: {before or 'not installed'}")
+
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pip_spec.split()],
+                   check=True)
+
+    # The import system caches directory listings; without this the freshly
+    # written dist-info is invisible and we would read the pre-install version.
+    import importlib  # noqa: PLC0415
+
+    importlib.invalidate_caches()
+
+    after = version_of("torch")
+    print(f"torch after install:  {after or 'not installed'}")
+
+    if before and after and before != after:
+        print(f"\ntorch changed {before} -> {after} under a running kernel.")
+        return True
+    return False
+
+
 def print_log(port: int = 8000, n: int = 60, log_dir: Optional[Path] = None) -> None:
     print(_tail(Path(log_dir or DEFAULT_LOG_DIR) / f"server-{port}.log", n))
 

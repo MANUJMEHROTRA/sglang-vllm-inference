@@ -137,6 +137,78 @@ def capture(usd_per_hour: Optional[float] = None) -> Hardware:
     return hw
 
 
+def torch_health() -> Dict[str, object]:
+    """Is the installed torch self-consistent, or half-replaced?
+
+    An engine install that pins its own torch build (``vllm`` pins an exact
+    ``torch==x.y.z``) swaps torch underneath a running Colab kernel. If the
+    swap is partial -- some files from the new version, some left from the one
+    Colab shipped -- torch starts failing to import *its own* internals:
+
+        ImportError: cannot import name '_chunk_or_narrow_cat'
+                     from 'torch._utils'
+
+    That traceback usually surfaces from deep inside ``transformers`` and
+    looks like a transformers bug, which sends people hunting for the wrong
+    version pin. It is not. A self-consistent torch release never fails to
+    import its own helpers, so this check goes straight at the real question:
+    can torch import the submodule that transformers will reach for?
+    """
+    out: Dict[str, object] = {
+        "installed_version": None,
+        "importable": False,
+        "self_consistent": False,
+        "error": None,
+    }
+    try:
+        import torch  # noqa: PLC0415
+
+        out["installed_version"] = torch.__version__
+        out["importable"] = True
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    try:
+        # The module that the transformers import chain pulls in, and the one
+        # that breaks on a half-swapped install.
+        import torch.distributed._functional_collectives  # noqa: PLC0415,F401
+
+        out["self_consistent"] = True
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def print_torch_health(engine: str = "the engine") -> bool:
+    """Report torch health and, if broken, print the actual remedy.
+
+    Returns True when torch is usable. The engine notebooks call this right
+    after installing an engine, because finding out here costs one cell and
+    finding out later costs a confusing traceback from inside a library that
+    did nothing wrong.
+    """
+    health = torch_health()
+    version = health["installed_version"] or "not installed"
+
+    if health["self_consistent"]:
+        print(f"torch {version}: self-consistent")
+        return True
+
+    print(f"torch {version}: BROKEN INSTALL")
+    print(f"  {health['error']}")
+    print()
+    print(f"  Installing {engine} pinned a different torch and the swap left a")
+    print("  mix of files from two versions. This is not a version-pin problem")
+    print("  and no amount of changing transformers versions will fix it.")
+    print()
+    print("  Fix, in a fresh cell:")
+    print("      !pip uninstall -y -q torch torchvision torchaudio torchcodec")
+    print(f"      !pip install -q {engine}")
+    print("  then Runtime -> Restart session, and run from the top.")
+    return False
+
+
 def package_versions(*names: str) -> Dict[str, str]:
     """Record the versions of the packages that produced a result.
 

@@ -165,7 +165,7 @@ Everything that can be verified without a GPU, is:
 ```bash
 make check                          # all of the below
 
-python tests/test_bench.py          # 18 tests: metrics, schema, validate, aggregate
+python tests/test_bench.py          # 21 tests: metrics, schema, validate, aggregate
 python tests/test_kernel_math.py    #  7 tests: int4 packing + the Triton kernel's
                                     #           exact index arithmetic, in numpy
 python tools/build_notebooks.py     # regenerates + syntax-checks every code cell
@@ -178,6 +178,41 @@ node   tools/check_responsive.mjs   # no horizontal scroll at phone width (Chrom
 The parity check matters: the roofline and KV formulas exist in both
 `bench/metrics.py` and `docs/assets/models.js`. Two copies of a formula drift,
 and when they do the website starts contradicting the measurements next to it.
+
+## Troubleshooting on Colab
+
+**`ImportError: cannot import name '_chunk_or_narrow_cat' from 'torch._utils'`**
+(or any error where torch fails to import its own internals, usually surfacing
+from inside `transformers`)
+
+This is **not** a version-pin problem, and changing transformers versions will
+not fix it. torch is failing to import its own helper, which a self-consistent
+release never does. `pip install vllm` pins an exact torch build
+(`torch==2.13.0` for vLLM 0.32.0); Colab ships a different one; the downgrade
+replaced some torch files and left others. Fix:
+
+```bash
+!pip uninstall -y -q torch torchvision torchaudio torchcodec
+!pip install -q vllm
+```
+
+then **Runtime → Restart session** and run from the top.
+
+Notebooks 01–04 call `install_engine()` and `print_torch_health()`, which
+detect this at the install cell and print the remedy rather than letting it
+surface later from a library that did nothing wrong.
+
+**Always start each engine notebook on a fresh runtime.** vLLM, SGLang and
+TensorRT-LLM pin different torch builds; installing one over another is how
+you get the mixed install above. `Runtime → Disconnect and delete runtime`
+between notebooks 01, 02 and 04.
+
+**Why the engine notebooks never import transformers.** They drive a server
+over HTTP and need a tokenizer only to build prompts of an exact token length.
+`bench.load_tokenizer()` uses the Rust `tokenizers` package, which imports no
+torch at all, so the client process cannot be broken by whatever the engine
+did to torch. Notebooks 00 and 06 do load models and do use transformers —
+they just do not install an engine.
 
 ## Editing the notebooks
 

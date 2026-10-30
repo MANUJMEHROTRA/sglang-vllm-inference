@@ -232,6 +232,80 @@ def test_presets_are_distinguishable():
     assert preset("chat", concurrency=16).concurrency == 16
 
 
+class _FakeFastTokenizer:
+    """Stands in for tokenizers.Tokenizer: encode() returns an object with .ids"""
+
+    __module__ = "tokenizers"
+
+    class _Enc:
+        def __init__(self, ids):
+            self.ids = ids
+
+    def encode(self, text, add_special_tokens=False):
+        return self._Enc([ord(c) for c in text])
+
+    def decode(self, ids):
+        return "".join(chr(i) for i in ids)
+
+
+class _FakeHFTokenizer:
+    """Stands in for a transformers tokenizer: encode() returns a list."""
+
+    __module__ = "transformers.tokenization_utils"
+
+    def encode(self, text, add_special_tokens=False):
+        return [ord(c) for c in text]
+
+    def decode(self, ids):
+        return "".join(chr(i) for i in ids)
+
+
+def test_prompt_builder_accepts_either_tokenizer_backend():
+    """The engine notebooks must not need transformers (and so torch) to
+    count tokens; notebooks 00/06 already hold a transformers tokenizer.
+    Both have to work through the same adapter."""
+    from bench.tokenizer import as_tokenizer  # noqa: PLC0415
+    from bench.workloads import PromptBuilder  # noqa: PLC0415
+
+    for raw in (_FakeFastTokenizer(), _FakeHFTokenizer()):
+        adapted = as_tokenizer(raw)
+        assert adapted.encode("abc") == [97, 98, 99]
+        assert adapted.decode([97, 98, 99]) == "abc"
+
+        builder = PromptBuilder(raw, seed=0)
+        # Exact length is the whole point of the builder.
+        text = builder.text_of_tokens(32, random.Random(0))
+        assert len(adapted.encode(text)) == 32
+
+    # Wrapping an already-wrapped adapter must be a no-op, not double-wrapping.
+    once = as_tokenizer(_FakeFastTokenizer())
+    assert as_tokenizer(once) is once
+
+
+def test_prompt_builder_builds_exact_shared_prefixes():
+    """A prefix that differs by one byte defeats a radix cache completely."""
+    from bench.workloads import PromptBuilder  # noqa: PLC0415
+
+    builder = PromptBuilder(_FakeFastTokenizer(), seed=0)
+    spec = preset("rag", n_requests=8, concurrency=4)
+    prompts = builder.build(spec)
+
+    assert len(prompts) == 8
+    assert len({p[: spec.shared_prefix_tokens] for p in prompts}) == 1
+    mean, lo, hi = builder.verify(prompts, spec)
+    assert lo == hi == spec.input_len, f"lengths drifted: {lo}..{hi}"
+
+
+def test_torch_health_reports_cleanly_without_torch():
+    """On a machine with no torch this must report, not raise."""
+    from bench.sysinfo import torch_health  # noqa: PLC0415
+
+    health = torch_health()
+    assert set(health) == {"installed_version", "importable", "self_consistent", "error"}
+    if not health["importable"]:
+        assert health["error"] and not health["self_consistent"]
+
+
 def test_repo_slug_parsing():
     """Colab badges 404 silently when this is wrong, so pin both remote forms."""
     from tools.nbgen import slug_from_url  # noqa: PLC0415

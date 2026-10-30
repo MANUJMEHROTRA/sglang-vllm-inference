@@ -47,6 +47,7 @@ from dataclasses import replace
 from typing import List, Optional, Sequence, Tuple
 
 from .schema import WorkloadSpec
+from .tokenizer import as_tokenizer
 
 # A pool of common English words. Real-ish subwords keep the tokenizer in a
 # normal regime (no weird byte-fallback explosions) while staying meaningless.
@@ -113,12 +114,15 @@ class PromptBuilder:
     """
 
     def __init__(self, tokenizer, seed: int = 0):
-        self.tok = tokenizer
+        # Accepts a `tokenizers.Tokenizer`, a transformers tokenizer, or the
+        # adapter returned by bench.load_tokenizer -- see bench/tokenizer.py
+        # for why the fast backend is worth preferring on Colab.
+        self.tok = as_tokenizer(tokenizer)
         self.seed = seed
         self._prefix_cache: dict[int, str] = {}
 
     def _encode_len(self, text: str) -> int:
-        return len(self.tok.encode(text, add_special_tokens=False))
+        return len(self.tok.encode(text))
 
     def text_of_tokens(self, n_tokens: int, rng: random.Random) -> str:
         """Generate text that encodes to *exactly* ``n_tokens`` tokens.
@@ -138,7 +142,7 @@ class PromptBuilder:
             while len(words) < target_words:
                 words.append(rng.choice(_WORDS))
             text = " ".join(words)
-            ids = self.tok.encode(text, add_special_tokens=False)
+            ids = self.tok.encode(text)
             if len(ids) >= n_tokens:
                 return self.tok.decode(ids[:n_tokens])
             target_words = max(target_words + 8, int(target_words * 1.2))

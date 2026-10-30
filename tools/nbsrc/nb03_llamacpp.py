@@ -487,14 +487,14 @@ a short prompt.
 
     code('''
 from bench import (EndpointConfig, EngineSpec, PromptBuilder, discover_model_id,
-                   free_gpu, kill_stale, llamacpp_cmd, preset, run, serve,
-                   sweep_concurrency)
+                   free_gpu, kill_stale, llamacpp_cmd, load_tokenizer, preset,
+                   run, serve, sweep_concurrency)
 from bench.plots import sweep_curve, table
-from transformers import AutoTokenizer
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-builder = PromptBuilder(tokenizer, seed=0)
+# Rust `tokenizers`, not transformers: llama-server is driven over HTTP, so
+# the client has no reason to import torch at all.
+builder = PromptBuilder(load_tokenizer(MODEL_ID), seed=0)
 PORT = 8000
 
 kill_stale(); free_gpu()

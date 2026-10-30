@@ -70,8 +70,26 @@ is often largest on small models at high concurrency, which is exactly the
 regime this notebook runs in.
 """),
 
+    md("""
+> **Start this notebook on a fresh runtime.** SGLang and vLLM pin different
+> torch builds, so installing one on top of the other leaves a mix of files
+> from two versions and torch stops being able to import its own internals.
+> `Runtime -> Disconnect and delete runtime` before running notebook 02 after
+> notebook 01. The check below catches it either way.
+"""),
+
     code('''
-%pip install -q "sglang[all]"
+from bench import install_engine, print_torch_health, restart_runtime
+
+TORCH_CHANGED = install_engine("sglang[all]", engine_name="'sglang[all]'")
+'''),
+
+    code('''
+if not print_torch_health("'sglang[all]'"):
+    raise SystemExit("torch install is inconsistent -- see the remedy above")
+
+if TORCH_CHANGED:
+    restart_runtime("torch was swapped by the SGLang install.")
 
 from bench import package_versions
 VERSIONS = package_versions("sglang", "torch", "transformers", "flashinfer-python")
@@ -82,11 +100,11 @@ for name, v in VERSIONS.items():
     code('''
 import matplotlib.pyplot as plt
 from dataclasses import replace
-from transformers import AutoTokenizer
 
 from bench import (EndpointConfig, EngineSpec, PromptBuilder, benchmark,
-                   describe, discover_model_id, free_gpu, kill_stale, preset,
-                   probe, run, serve, sglang_cmd, sweep_concurrency)
+                   describe, discover_model_id, free_gpu, kill_stale,
+                   load_tokenizer, preset, probe, run, serve, sglang_cmd,
+                   sweep_concurrency)
 from bench.plots import PALETTE, cdf, grouped_bar, save, sweep_curve, table, use_theme
 from bench.servers import print_log
 
@@ -97,8 +115,9 @@ MAX_LEN = 4096
 MEM_FRACTION = 0.80 if (HW.gpu_memory_gb or 16) <= 16 else 0.88
 DTYPE = "float16" if not CAPS["bf16"] else "auto"
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-builder = PromptBuilder(tokenizer, seed=0)
+# Rust `tokenizers`, not transformers -- see notebook 01 on why the client
+# process should not import torch just to count tokens.
+builder = PromptBuilder(load_tokenizer(MODEL_ID), seed=0)
 
 kill_stale(); free_gpu()
 '''),

@@ -147,19 +147,17 @@ honestly rather than silently.
 
     code('''
 import matplotlib.pyplot as plt
-from transformers import AutoTokenizer
 
 from bench import (EndpointConfig, EngineSpec, PromptBuilder, discover_model_id,
-                   free_gpu, kill_stale, preset, probe, run, serve,
-                   sweep_concurrency, trtllm_cmd)
+                   free_gpu, kill_stale, load_tokenizer, preset, probe, run,
+                   serve, sweep_concurrency, trtllm_cmd)
 from bench.plots import save, sweep_curve, table, use_theme
 from bench.servers import print_log
 
 use_theme()
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 PORT = 8000
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-builder = PromptBuilder(tokenizer, seed=0)
+builder = PromptBuilder(load_tokenizer(MODEL_ID), seed=0)
 
 trt_sweep = []
 if TRT_INSTALLED:
